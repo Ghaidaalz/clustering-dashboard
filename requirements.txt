@@ -1,8 +1,6 @@
 streamlit==1.36.0
 plotly==5.22.0
 pandas==2.2.2
+scikit-learn==1.5.1
+keras==3.4.1
 numpy==1.26.4
-scikit-learn==1.4.2
-pillow==10.3.0
-keras==3.2.1
-protobuf<4
