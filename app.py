@@ -1,9 +1,10 @@
 # app.py
-# Streamlit dashboard for Fashion-MNIST Phases 1–4
+# Streamlit dashboard for Fashion-MNIST — Phases 1–6
 
 import warnings
 warnings.filterwarnings("ignore")
 
+import io
 import random
 import numpy as np
 import pandas as pd
@@ -12,16 +13,17 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
+from PIL import Image
+
 from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.cluster import KMeans, DBSCAN
 from sklearn.metrics import silhouette_score, silhouette_samples, mean_squared_error
-
 from sklearn.datasets import fetch_openml
-# How many points we use for heavy work on Streamlit Cloud
+
+# ----------------------------- performance caps (Cloud-friendly) -----------------------------
 MAX_PLOT_POINTS = 8000       # for 2D/3D plots
 MAX_SILH_POINTS = 8000       # for silhouette computations
-
-
+MAX_POOL_POINTS = 8000       # for similarity search pool in Phase 6
 
 # ---------------------------------------------------------------------
 # Page config + simple dark styling (works with the default dark theme)
@@ -55,6 +57,38 @@ CLASS_NAMES = [
     'Sandal', 'Shirt', 'Sneaker', 'Bag', 'Ankle boot'
 ]
 
+# =============================== Helpers for Phase 6 (upload & similarity) ===============================
+def load_and_prepare_image(file_bytes_or_pil, invert=False):
+    """
+    Reads an uploaded image or PIL.Image, converts to 28x28 grayscale,
+    returns:
+      - img_28x28: (28, 28) float32 in [0,1]
+      - flat: (784,) float32 flattened and normalized
+    """
+    if isinstance(file_bytes_or_pil, Image.Image):
+        pil = file_bytes_or_pil
+    else:
+        pil = Image.open(io.BytesIO(file_bytes_or_pil))
+
+    pil = pil.convert("L").resize((28, 28))  # grayscale 28x28
+    arr = np.array(pil).astype(np.float32) / 255.0
+    if invert:
+        arr = 1.0 - arr
+    flat = arr.reshape(-1).astype(np.float32)
+    return arr, flat
+
+
+def topk_similar(feature_vec, features_matrix, pool_idx, k=6):
+    """
+    Returns indices (within pool_idx) of the k most similar items to feature_vec
+    using Euclidean distance in the PCA feature space.
+    """
+    pool_feats = features_matrix[pool_idx]            # (n_pool, n_features)
+    d2 = np.sum((pool_feats - feature_vec) ** 2, axis=1)
+    order = np.argsort(d2)[:k]
+    return pool_idx[order], np.sqrt(d2[order])
+
+
 # ---------------------------------------------------------------------
 # Cache helpers
 # ---------------------------------------------------------------------
@@ -65,32 +99,24 @@ def load_data():
     Returns the same shapes/types as before:
       (X_train, y_train), (X_test, y_test) but flattened to 4 arrays.
     """
-    # fetch Fashion-MNIST (70k images, 28x28)
     X, y = fetch_openml("Fashion-MNIST", version=1, as_frame=False, return_X_y=True)
-
-    # reshape back to (n, 28, 28)
     X = X.reshape(-1, 28, 28).astype("uint8")
-
-    # ensure y is int64 numpy array
     try:
         y = y.astype("int64").to_numpy()
     except AttributeError:
         y = y.astype("int64")
 
-    # keep the usual 60k/10k split
     X_train, X_test = X[:60000], X[60000:]
     y_train, y_test = y[:60000], y[60000:]
-
     return X_train, y_train, X_test, y_test
-
 
 
 @st.cache_data(show_spinner=False)
 def normalize_and_flatten(X_train, X_test):
     X_train_norm = X_train.astype(np.float32) / 255.0
-    X_test_norm = X_test.astype(np.float32) / 255.0
+    X_test_norm  = X_test.astype(np.float32) / 255.0
     X_train_flat = X_train_norm.reshape(len(X_train_norm), -1)
-    X_test_flat = X_test_norm.reshape(len(X_test_norm), -1)
+    X_test_flat  = X_test_norm.reshape(len(X_test_norm), -1)
     return X_train_norm, X_test_norm, X_train_flat, X_test_flat
 
 
@@ -158,21 +184,17 @@ def stacked_split(true_y, labels, top_n=3, algo_title=""):
     return plot_df
 
 
-import plotly.express as px
-
 def silhouette_per_cluster(X, labels, title="", bar_color="#FFB6C1", max_n=None, seed=42):
     unique_labels = np.unique(labels)
     # need >=2 labels and at least one non-noise point
     if len(unique_labels) < 2 or (len(unique_labels) == 1 and unique_labels[0] == -1):
         return None, None
 
-    # sample for speed if requested
     if max_n is not None and len(X) > max_n:
         rng = np.random.default_rng(seed)
         idx = rng.choice(len(X), size=max_n, replace=False)
         X_use = X[idx]
         L_use = labels[idx]
-        # Still need ≥ 2 labels after sampling
         if len(np.unique(L_use)) < 2:
             return None, None
     else:
@@ -183,23 +205,12 @@ def silhouette_per_cluster(X, labels, title="", bar_color="#FFB6C1", max_n=None,
     df_sil = pd.DataFrame({"cluster": L_use, "silhouette": sil_vals})
     df_mean = df_sil.groupby('cluster', as_index=False)['silhouette'].mean()
 
-    fig = px.bar(
-        df_mean, x='cluster', y='silhouette', text='silhouette', title=title
-    )
-    fig.update_traces(
-        marker_color=bar_color,
-        texttemplate='%{text:.3f}',
-        textposition='outside'
-    )
-    fig.update_layout(
-        yaxis_title="Mean silhouette",
-        xaxis_title="cluster"
-    )
+    fig = px.bar(df_mean, x='cluster', y='silhouette', text='silhouette', title=title)
+    fig.update_traces(marker_color=bar_color, texttemplate='%{text:.3f}', textposition='outside')
+    fig.update_layout(yaxis_title="Mean silhouette", xaxis_title="cluster")
 
     global_sil = float(df_sil['silhouette'].mean())
     return fig, global_sil
-
-
 
 
 # ---------------------------------------------------------------------
@@ -466,6 +477,9 @@ with st.expander("Phase 4 — Analysis & Interpretation", expanded=True):
     plot_n = min(MAX_PLOT_POINTS, len(PC2_full))
     plot_idx = rng.choice(len(PC2_full), size=plot_n, replace=False)
 
+    # For Phase 6 (similarity), keep a full index reference
+    idx_all = np.arange(len(X_train_flat))
+
     # 2D/3D plots (sampled)
     st.plotly_chart(
         px.scatter(x=PC2_full[plot_idx, 0], y=PC2_full[plot_idx, 1],
@@ -534,3 +548,111 @@ with st.expander("Phase 4 — Analysis & Interpretation", expanded=True):
     else:
         st.info("DBSCAN: not enough non-noise clusters for silhouette.")
 
+# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Phase 6 — Upload / Pick a sample (Predict + Similarity + PCA highlight)
+# ---------------------------------------------------------------------
+with st.expander("Phase 6 — Upload or pick a sample (predict & similar)", expanded=True):
+
+    # 1) Make sure we have data + PCA features (compute if needed)
+    X_train, y_train, X_test, y_test = load_data()
+    X_train_norm, X_test_norm, X_train_flat, X_test_flat = normalize_and_flatten(X_train, X_test)
+
+    if 'pca' not in st.session_state:
+        st.session_state.pca = fit_pca(X_train_flat)
+    pca = st.session_state.pca
+
+    if 'X_feat' not in st.session_state:
+        st.session_state.X_feat = pca.transform(X_train_flat)  # PCA features for train set
+    X_feat = st.session_state.X_feat
+    PC2_full = X_feat[:, :2]  # for plotting
+
+    # KMeans model (use current k_final from sidebar)
+    if 'km_final' not in st.session_state or (st.session_state.k_used if 'k_used' in st.session_state else None) != int(k_final):
+        st.session_state.km_final = KMeans(n_clusters=int(k_final), n_init=20, random_state=RNG_SEED).fit(X_feat)
+        st.session_state.k_used = int(k_final)
+    km_final = st.session_state.km_final
+    km_labels = km_final.labels_
+
+    # 2) UI: upload OR pick a sample
+    c1, c2, c3 = st.columns([1,1,1])
+    with c1:
+        upl = st.file_uploader("Upload image (PNG/JPG)", type=["png", "jpg", "jpeg"])
+    with c2:
+        pick_sample = st.checkbox("Pick dataset sample instead", value=False)
+    with c3:
+        invert_opt = st.checkbox("Invert colors (if needed)", value=False)
+
+    sample_idx = st.number_input("Sample index (0..59999)", min_value=0, max_value=59999, value=0, step=1)
+
+    # 3) Read user image -> (28x28) + flat
+    user_img = None
+    user_flat = None
+    user_src = None
+
+    if pick_sample:
+        user_img = X_train_norm[sample_idx]                 # (28,28) in [0,1]
+        user_flat = user_img.reshape(-1).astype(np.float32) # (784,)
+        user_src = f"Dataset sample #{sample_idx}"
+    elif upl is not None:
+        user_img, user_flat = load_and_prepare_image(upl.read(), invert=invert_opt)
+        user_src = "Uploaded image"
+    else:
+        st.info("Upload an image or tick 'Pick dataset sample instead' to continue.")
+
+    # 4) If we have an image, predict cluster & show similar
+    if user_img is not None:
+        st.caption(f"Input: {user_src}")
+        st.image(user_img, width=140, clamp=True)
+
+        # Project with PCA
+        user_pca = pca.transform(user_flat.reshape(1, -1))    # (1, n_pcs)
+
+        # Predict cluster
+        user_cluster = int(km_final.predict(user_pca)[0])
+        st.markdown(f"**Predicted K-Means cluster:** `{user_cluster}`")
+
+        # Similar items within same cluster (limit pool size)
+        pool_idx = np.where(km_labels == user_cluster)[0]
+        if len(pool_idx) > MAX_POOL_POINTS:
+            rng = np.random.default_rng(RNG_SEED)
+            pool_idx = rng.choice(pool_idx, size=MAX_POOL_POINTS, replace=False)
+
+        # Find nearest neighbors in PCA space
+        def _topk_similar(feature_vec, features_matrix, pool_idx, k=6):
+            pool_feats = features_matrix[pool_idx]
+            d2 = np.sum((pool_feats - feature_vec) ** 2, axis=1)
+            order = np.argsort(d2)[:k]
+            return pool_idx[order], np.sqrt(d2[order])
+
+        nn_idx, nn_dist = _topk_similar(user_pca[0], X_feat, pool_idx, k=6)
+
+        st.write(f"Most similar {len(nn_idx)} items from cluster {user_cluster}:")
+        cols = st.columns(len(nn_idx))
+        for j, (ii, dd) in enumerate(zip(nn_idx, nn_dist)):
+            with cols[j]:
+                st.image(X_train_norm[ii], clamp=True, width=100)
+                st.caption(f"idx={ii} • dist={dd:.3f}")
+
+        # 5) Plot PCA-2D with user point highlighted
+        st.subheader("PCA 2D projection (user highlighted)")
+        SUB = min(6000, len(PC2_full))
+        rng = np.random.default_rng(RNG_SEED)
+        sub_idx = rng.choice(len(PC2_full), size=SUB, replace=False)
+
+        fig_user = go.Figure()
+        fig_user.add_trace(go.Scatter(
+            x=PC2_full[sub_idx, 0], y=PC2_full[sub_idx, 1],
+            mode='markers', name='data',
+            marker=dict(size=4, opacity=0.25),
+            showlegend=False
+        ))
+        fig_user.add_trace(go.Scatter(
+            x=[float(user_pca[0, 0])], y=[float(user_pca[0, 1])],
+            mode='markers+text', text=["YOU"], textposition='top center',
+            marker=dict(size=12, symbol='star', line=dict(width=1), color='#FFD166'),
+            name='user'
+        ))
+        fig_user.update_layout(template=PLOTLY_TMPL, xaxis_title="PC1", yaxis_title="PC2",
+                               title="User image in PCA-2D space")
+        st.plotly_chart(fig_user, use_container_width=True)
