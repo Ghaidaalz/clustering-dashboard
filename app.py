@@ -16,7 +16,8 @@ from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.cluster import KMeans, DBSCAN
 from sklearn.metrics import silhouette_score, silhouette_samples, mean_squared_error
 
-from keras.datasets import fashion_mnist
+from sklearn.datasets import fetch_openml
+
 
 
 
@@ -57,8 +58,29 @@ CLASS_NAMES = [
 # ---------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def load_data():
-    (X_train, y_train), (X_test, y_test) = fashion_mnist.load_data()
+    """
+    Fetch Fashion-MNIST from OpenML (no Keras/TF needed).
+    Returns the same shapes/types as before:
+      (X_train, y_train), (X_test, y_test) but flattened to 4 arrays.
+    """
+    # fetch Fashion-MNIST (70k images, 28x28)
+    X, y = fetch_openml("Fashion-MNIST", version=1, as_frame=False, return_X_y=True)
+
+    # reshape back to (n, 28, 28)
+    X = X.reshape(-1, 28, 28).astype("uint8")
+
+    # ensure y is int64 numpy array
+    try:
+        y = y.astype("int64").to_numpy()
+    except AttributeError:
+        y = y.astype("int64")
+
+    # keep the usual 60k/10k split
+    X_train, X_test = X[:60000], X[60000:]
+    y_train, y_test = y[:60000], y[60000:]
+
     return X_train, y_train, X_test, y_test
+
 
 
 @st.cache_data(show_spinner=False)
