@@ -16,7 +16,8 @@ from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.cluster import KMeans, DBSCAN
 from sklearn.metrics import silhouette_score, silhouette_samples, mean_squared_error
 
-from tensorflow.keras.datasets import fashion_mnist
+from keras.datasets import fashion_mnist
+
 
 
 # ---------------------------------------------------------------------
