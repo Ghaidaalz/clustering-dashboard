@@ -17,7 +17,9 @@ from sklearn.cluster import KMeans, DBSCAN
 from sklearn.metrics import silhouette_score, silhouette_samples, mean_squared_error
 
 from sklearn.datasets import fetch_openml
-
+# How many points we use for heavy work on Streamlit Cloud
+MAX_PLOT_POINTS = 8000       # for 2D/3D plots
+MAX_SILH_POINTS = 8000       # for silhouette computations
 
 
 
@@ -158,48 +160,45 @@ def stacked_split(true_y, labels, top_n=3, algo_title=""):
 
 import plotly.express as px
 
-def silhouette_per_cluster(X, labels, title="", bar_color="#FFB6C1"):
-    from sklearn.metrics import silhouette_samples
-    import numpy as np
-    import pandas as pd
-
-    # Handle case where not enough clusters
+def silhouette_per_cluster(X, labels, title="", bar_color="#FFB6C1", max_n=None, seed=42):
     unique_labels = np.unique(labels)
-    if len(unique_labels) < 2:
+    # need >=2 labels and at least one non-noise point
+    if len(unique_labels) < 2 or (len(unique_labels) == 1 and unique_labels[0] == -1):
         return None, None
 
-    # Compute silhouette values
-    sil_vals = silhouette_samples(X, labels)
-    df_sil = pd.DataFrame({
-        'cluster': labels,
-        'silhouette': sil_vals
-    })
+    # sample for speed if requested
+    if max_n is not None and len(X) > max_n:
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(len(X), size=max_n, replace=False)
+        X_use = X[idx]
+        L_use = labels[idx]
+        # Still need ≥ 2 labels after sampling
+        if len(np.unique(L_use)) < 2:
+            return None, None
+    else:
+        X_use = X
+        L_use = labels
 
-    # Mean silhouette per cluster
+    sil_vals = silhouette_samples(X_use, L_use)
+    df_sil = pd.DataFrame({"cluster": L_use, "silhouette": sil_vals})
     df_mean = df_sil.groupby('cluster', as_index=False)['silhouette'].mean()
 
-    # Create bar chart
     fig = px.bar(
-        df_mean,
-        x='cluster',
-        y='silhouette',
-        text='silhouette',  # Add labels to bars
-        title=title
+        df_mean, x='cluster', y='silhouette', text='silhouette', title=title
     )
-
-    # Customize colors & label format
     fig.update_traces(
         marker_color=bar_color,
-        texttemplate='%{text:.3f}',  # Format labels to 3 decimals
-        textposition='outside'       # Position above bars
+        texttemplate='%{text:.3f}',
+        textposition='outside'
     )
     fig.update_layout(
         yaxis_title="Mean silhouette",
         xaxis_title="cluster"
     )
 
-    global_sil = df_sil['silhouette'].mean()
+    global_sil = float(df_sil['silhouette'].mean())
     return fig, global_sil
+
 
 
 
@@ -462,13 +461,15 @@ with st.expander("Phase 4 — Analysis & Interpretation", expanded=True):
     db_final = DBSCAN(eps=float(eps_val), min_samples=int(ms_val), n_jobs=-1)
     db_labels = db_final.fit_predict(X_feat)
 
-    # sampled 2D/3D plots
-    N = min(10000, len(PC2_full))
-    idx = np.random.default_rng(RNG_SEED).choice(len(PC2_full), size=N, replace=False)
+    # ---------- NEW: sample once for plotting & per-class bars ----------
+    rng = np.random.default_rng(RNG_SEED)
+    plot_n = min(MAX_PLOT_POINTS, len(PC2_full))
+    plot_idx = rng.choice(len(PC2_full), size=plot_n, replace=False)
 
+    # 2D/3D plots (sampled)
     st.plotly_chart(
-        px.scatter(x=PC2_full[idx, 0], y=PC2_full[idx, 1],
-                   color=pd.Series(km_labels[idx], dtype="category").astype(str),
+        px.scatter(x=PC2_full[plot_idx, 0], y=PC2_full[plot_idx, 1],
+                   color=pd.Series(km_labels[plot_idx], dtype="category").astype(str),
                    title=f"K-Means (K={int(k_final)}) — PCA 2D projection",
                    labels={"x": "PC1", "y": "PC2", "color": "cluster"},
                    template=PLOTLY_TMPL),
@@ -476,16 +477,16 @@ with st.expander("Phase 4 — Analysis & Interpretation", expanded=True):
     )
 
     st.plotly_chart(
-        px.scatter_3d(x=PC3_full[idx, 0], y=PC3_full[idx, 1], z=PC3_full[idx, 2],
-                      color=pd.Series(km_labels[idx], dtype="category").astype(str),
+        px.scatter_3d(x=PC3_full[plot_idx, 0], y=PC3_full[plot_idx, 1], z=PC3_full[plot_idx, 2],
+                      color=pd.Series(km_labels[plot_idx], dtype="category").astype(str),
                       title=f"K-Means (K={int(k_final)}) — PCA 3D projection",
                       template=PLOTLY_TMPL).update_traces(marker=dict(size=3)),
         use_container_width=True
     )
 
     st.plotly_chart(
-        px.scatter(x=PC2_full[idx, 0], y=PC2_full[idx, 1],
-                   color=pd.Series(db_labels[idx], dtype="category").astype(str),
+        px.scatter(x=PC2_full[plot_idx, 0], y=PC2_full[plot_idx, 1],
+                   color=pd.Series(db_labels[plot_idx], dtype="category").astype(str),
                    title=f"DBSCAN (eps={float(eps_val)}, min_samples={int(ms_val)}) — PCA 2D projection",
                    labels={"x": "PC1", "y": "PC2", "color": "cluster"},
                    template=PLOTLY_TMPL),
@@ -493,23 +494,27 @@ with st.expander("Phase 4 — Analysis & Interpretation", expanded=True):
     )
 
     st.plotly_chart(
-        px.scatter_3d(x=PC3_full[idx, 0], y=PC3_full[idx, 1], z=PC3_full[idx, 2],
-                      color=pd.Series(db_labels[idx], dtype="category").astype(str),
+        px.scatter_3d(x=PC3_full[plot_idx, 0], y=PC3_full[plot_idx, 1], z=PC3_full[plot_idx, 2],
+                      color=pd.Series(db_labels[plot_idx], dtype="category").astype(str),
                       title=f"DBSCAN (eps={float(eps_val)}, min_samples={int(ms_val)}) — PCA 3D projection",
                       template=PLOTLY_TMPL).update_traces(marker=dict(size=3)),
         use_container_width=True
     )
 
-    # concise per-class split bars
+    # concise per-class split bars (use the same sample so it’s fast)
     st.subheader("Per-class split across top clusters")
-    stacked_split(y_train, km_labels, top_n=3, algo_title=f"K-Means (K={int(k_final)})")
-    stacked_split(y_train, db_labels, top_n=3, algo_title=f"DBSCAN (eps={float(eps_val)}, min_samples={int(ms_val)})")
+    stacked_split(y_train[plot_idx], km_labels[plot_idx],
+                  top_n=3, algo_title=f"K-Means (K={int(k_final)})")
+    stacked_split(y_train[plot_idx], db_labels[plot_idx],
+                  top_n=3, algo_title=f"DBSCAN (eps={float(eps_val)}, min_samples={int(ms_val)})")
 
-    # silhouette quality (custom bar colors)
+    # silhouette quality (sampled)
     st.subheader("Silhouette quality")
-    # K-Means: pastel pink
     fig_sk, glob_k = silhouette_per_cluster(
-        X_feat, km_labels, title=f"K-Means (K={int(k_final)})", bar_color="#FFB6C1"
+        X_feat, km_labels,
+        title=f"K-Means (K={int(k_final)})",
+        bar_color="#FFB6C1",
+        max_n=MAX_SILH_POINTS
     )
     if fig_sk is not None:
         st.write(f"K-Means global silhouette: {glob_k:.4f}")
@@ -517,12 +522,15 @@ with st.expander("Phase 4 — Analysis & Interpretation", expanded=True):
     else:
         st.info("K-Means: not enough clusters for silhouette.")
 
-    # DBSCAN: light blue
     fig_sd, glob_d = silhouette_per_cluster(
-        X_feat, db_labels, title=f"DBSCAN (eps={float(eps_val)}, min_samples={int(ms_val)})", bar_color="#ADD8E6"
+        X_feat, db_labels,
+        title=f"DBSCAN (eps={float(eps_val)}, min_samples={int(ms_val)})",
+        bar_color="#ADD8E6",
+        max_n=MAX_SILH_POINTS
     )
     if fig_sd is not None:
         st.write(f"DBSCAN global silhouette: {glob_d:.4f}")
         st.plotly_chart(fig_sd, use_container_width=True)
     else:
         st.info("DBSCAN: not enough non-noise clusters for silhouette.")
+
